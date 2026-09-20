@@ -11,7 +11,7 @@ import {
   YAxis,
 } from "recharts";
 
-import { ColoredSquare, Slider, Switch } from "@repo/theme";
+import { ColoredSquare, Slider } from "@repo/theme";
 
 import {
   ChartContainer,
@@ -22,22 +22,20 @@ import { CourseAnalyticsGraphBox } from "@/components/CourseAnalytics/CourseAnal
 import type { Input } from "@/components/CourseAnalytics/types";
 import useWindowDimensions from "@/hooks/useWindowDimensions";
 import type { IGradeDistribution } from "@/lib/api";
-import { LETTER_GRADES, PASS_FAIL } from "@/lib/grades";
 
 import styles from "./GradeBarGraph.module.scss";
-import { buildGradeChartData, isLetterGrade } from "./GradeBarGraph.utils";
+import {
+  buildGradeChartData,
+  formatLetterGradeTooltip,
+  summarizePnpOutcomes,
+} from "./GradeBarGraph.utils";
+import PnpOutcomesSection from "./PnpOutcomesSection";
 
 const CHART_HEIGHT_RATIO = 0.55;
 const HORIZONTAL_CHART_HEIGHT_RATIO = 0.72;
 const HORIZONTAL_ENTER_WIDTH = 600;
 const HORIZONTAL_EXIT_WIDTH = 640;
 const RANGE_UPDATE_THROTTLE_MS = 100;
-
-const ordinal = (n: number): string => {
-  const s = ["th", "st", "nd", "rd"];
-  const v = n % 100;
-  return n + (s[(v - 20) % 10] || s[v] || s[0]);
-};
 
 const isGradeInRange = (
   pctlLo: number,
@@ -78,7 +76,6 @@ export default function GradeBarGraph({
   const liveRangeRef = useRef<[number, number]>([0, 100]);
   const thumbLabelLeftRef = useRef<HTMLSpanElement>(null);
   const thumbLabelRightRef = useRef<HTMLSpanElement>(null);
-  const [showPassNoPass, setShowPassNoPass] = useState(true);
   const throttleTimeoutRef = useRef<number | null>(null);
   const pendingRangeRef = useRef<[number, number] | null>(null);
   const lastRangeCommitAtRef = useRef(0);
@@ -135,15 +132,6 @@ export default function GradeBarGraph({
     }
   }, []);
 
-  const isFilterActive = sliderRange[0] !== 0 || sliderRange[1] !== 100;
-  const displayedGrades = useMemo(
-    () =>
-      showPassNoPass && !isFilterActive
-        ? [...LETTER_GRADES, ...PASS_FAIL]
-        : LETTER_GRADES,
-    [showPassNoPass, isFilterActive]
-  );
-
   const { chartData, chartConfig, dataKeys } = useMemo(() => {
     if (outputs.length === 0) {
       return { chartData: [], chartConfig: {}, dataKeys: [] };
@@ -164,12 +152,33 @@ export default function GradeBarGraph({
 
     const chartData = buildGradeChartData(
       outputs.map((output) => output.data?.distribution),
-      dataKeys,
-      displayedGrades
+      dataKeys
     );
 
     return { chartData, chartConfig, dataKeys };
-  }, [outputs, displayedGrades]);
+  }, [outputs]);
+
+  const pnpItems = useMemo(
+    () =>
+      outputs.flatMap((output, index) => {
+        const summary = summarizePnpOutcomes(output.data?.distribution);
+        if (!summary) return [];
+
+        return [
+          {
+            key: `course${index}`,
+            label: `${output.input.subject} ${output.input.courseNumber}`,
+            color: output.color,
+            summary,
+            dimmed:
+              hoveredIndex !== null &&
+              outputs.length > 1 &&
+              hoveredIndex !== index,
+          },
+        ];
+      }),
+    [outputs, hoveredIndex]
+  );
 
   const commitSliderRange = useCallback((next: [number, number]) => {
     lastRangeCommitAtRef.current = Date.now();
@@ -246,12 +255,14 @@ export default function GradeBarGraph({
   const cellFills = useMemo(() => {
     return dataKeys.map((key, keyIndex) =>
       chartData.map((row) => {
-        const hasPercentile = isLetterGrade(row.letter);
         const pctlLo = row[`${key}_pctlLo`] as number;
         const pctlHi = row[`${key}_pctlHi`] as number;
-        const inRange =
-          !hasPercentile ||
-          isGradeInRange(pctlLo, pctlHi, sliderRange[0], sliderRange[1]);
+        const inRange = isGradeInRange(
+          pctlLo,
+          pctlHi,
+          sliderRange[0],
+          sliderRange[1]
+        );
         const isHoveredCourse =
           hoveredIndex === null ||
           outputs.length <= 1 ||
@@ -272,24 +283,11 @@ export default function GradeBarGraph({
     Math.round(viewportHeight * chartHeightRatio)
   );
   const emptyGraphHeight = chartHeight + 32;
-  const graphControls = (
-    <div className={styles.graphHeader}>
-      <label className={styles.switchRow}>
-        <span className={styles.switchLabel}>Show P/NP</span>
-        <Switch
-          checked={showPassNoPass}
-          onCheckedChange={setShowPassNoPass}
-          aria-label="Show P/NP columns"
-        />
-      </label>
-    </div>
-  );
 
   return (
     <div className={styles.root} ref={rootRef} style={undefined}>
       {hasOutputs ? (
         <CourseAnalyticsGraphBox>
-          {graphControls}
           <ChartContainer config={chartConfig} className={styles.chart}>
             <ResponsiveContainer width="100%" height={chartHeight}>
               <BarChart
@@ -368,23 +366,30 @@ export default function GradeBarGraph({
                   }}
                   content={({ active, payload, label }) => {
                     if (!active || !payload?.length) return null;
+                    const letter = String(label);
                     return (
                       <div className={styles.tooltipCard}>
-                        <div className={styles.tooltipLabel}>
-                          Grade: {label}
-                        </div>
                         <div className={styles.tooltipItems}>
                           {payload.map((item) => {
                             const key = item.dataKey as string;
                             const row = item.payload;
-                            const hasPercentile = isLetterGrade(
-                              String(row.letter)
+                            const courseLabel = String(
+                              chartConfig[key]?.label ?? item.name ?? key
                             );
-                            const pctlLo = row[`${key}_pctlLo`] as number;
-                            const pctlHi = row[`${key}_pctlHi`] as number;
+                            const copy = formatLetterGradeTooltip({
+                              letter,
+                              courseLabel,
+                              percentage: Number(item.value ?? 0),
+                              count: Number(row[`${key}_count`] ?? 0),
+                              letterTotal: Number(
+                                row[`${key}_letterTotal`] ?? 0
+                              ),
+                              pctlLo: Number(row[`${key}_pctlLo`] ?? 0),
+                              pctlHi: Number(row[`${key}_pctlHi`] ?? 0),
+                            });
                             return (
-                              <div key={key} className={styles.tooltipItem}>
-                                <span className={styles.tooltipItemLabel}>
+                              <div key={key} className={styles.tooltipBlock}>
+                                <div className={styles.tooltipBlockTitle}>
                                   <ColoredSquare
                                     size="sm"
                                     color={
@@ -395,17 +400,16 @@ export default function GradeBarGraph({
                                     variant="square"
                                     className={styles.tooltipIndicator}
                                   />
-                                  {chartConfig[key]?.label ?? item.name}
-                                </span>
-                                <span className={styles.tooltipItemValue}>
-                                  {formatters.percent(item.value, 1)}
-                                </span>
-                                {hasPercentile && (
-                                  <span className={styles.tooltipItemValue}>
-                                    {ordinal(Math.round(pctlLo))}–
-                                    {ordinal(Math.round(pctlHi))} percentile
-                                  </span>
-                                )}
+                                  {copy.title}
+                                </div>
+                                {copy.lines.map((line) => (
+                                  <div
+                                    key={line}
+                                    className={styles.tooltipBlockLine}
+                                  >
+                                    {line}
+                                  </div>
+                                ))}
                               </div>
                             );
                           })}
@@ -435,16 +439,22 @@ export default function GradeBarGraph({
           className={styles.emptyGraphPrompt}
           style={{ height: emptyGraphHeight }}
         >
-          {graphControls}
           <div className={styles.emptyGraphMessage}>
             Add a class from the sidebar to view the graph.
           </div>
         </div>
       )}
+      {pnpItems.length > 0 && (
+        <CourseAnalyticsGraphBox>
+          <PnpOutcomesSection items={pnpItems} />
+        </CourseAnalyticsGraphBox>
+      )}
       <div className={styles.sliderArea}>
-        <p className={styles.sliderTitle}>Filter by percentile</p>
+        <p className={styles.sliderTitle}>Highlight letter-grade percentiles</p>
         <p className={styles.sliderDescription}>
-          Drag the slider to highlight grades within a percentile range.
+          Drag the slider to highlight letter-grade buckets within a percentile
+          range. This dims buckets outside the range and does not remove grade
+          records or change P/NP outcomes.
         </p>
         <div className={styles.sliderWrapper}>
           <Slider
